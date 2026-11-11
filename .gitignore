@@ -1,0 +1,8 @@
+# your settings (API key) and translation cache, when kept next to the program
+config.json
+translations.json
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.json.tmp

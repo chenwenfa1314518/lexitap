@@ -1,0 +1,87 @@
+# On every push to main: tests the app and builds the installable packages on GitHub's Windows, macOS
+# and Linux machines (PyInstaller can't build for another system). The packages are kept with the run,
+# under "Artifacts". If the version number in lexitap.py has no release yet, they are also published
+# as the release v<version>. So, to release: raise __version__ in lexitap.py and push.
+# A release appears only if, on every system, the tests pass and the package installs and starts.
+name: build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:  # a newer push replaces a run that is still going
+  group: build
+  cancel-in-progress: true
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest: Apple silicon Macs, macos-15-intel: Intel Macs. ubuntu-22.04: the oldest Linux
+        # GitHub still offers, so the package also runs on older systems (it closes in April 2027).
+        os: [windows-latest, macos-latest, macos-15-intel, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      # PyMuPDF 2 has no ready-made build for Intel Macs, and compiling it there takes over 20 minutes
+      - run: python -m pip install "pymupdf${{ matrix.os == 'macos-15-intel' && '<2' || '' }}" pyinstaller pillow
+      - name: Test
+        shell: bash
+        run: ${{ runner.os == 'Linux' && 'xvfb-run -a' || '' }} python tests/test_reader.py
+      - name: Install Inno Setup (for the Windows installer)
+        if: runner.os == 'Windows'
+        run: if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - run: python packaging/build.py
+      - name: Check that the installer installs and the installed app starts (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $dir = "$env:RUNNER_TEMP\LexiTap"
+          $setup = Start-Process (Get-ChildItem dist\*-setup.exe).FullName "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=$dir" -Wait -PassThru
+          if ($setup.ExitCode) { throw "Setup ended with exit code $($setup.ExitCode)" }
+          $app = Start-Process "$dir\LexiTap.exe" -PassThru
+          Start-Sleep 15
+          if ($app.HasExited) { throw 'LexiTap did not stay open' }
+          Stop-Process $app
+      - name: Check that the disk image opens and the app starts (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          hdiutil attach dist/*.dmg -nobrowse -mountpoint /tmp/lexitap
+          cp -R /tmp/lexitap/LexiTap.app /Applications
+          hdiutil detach /tmp/lexitap
+          /Applications/LexiTap.app/Contents/MacOS/LexiTap &
+          sleep 15
+          pkill -x LexiTap  # fails if the app is not running any more
+      - name: Check that the package installs and the app starts (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y ./dist/lexitap_*.deb
+          xvfb-run -a lexitap &
+          sleep 15
+          pkill -x lexitap  # fails if the app is not running any more
+      - name: pip package (the same for every system)
+        if: runner.os == 'Linux'
+        run: python -m pip wheel . --no-deps -w dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packages-${{ matrix.os }}
+          path: dist/*
+          retention-days: 14
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the packages, if this version has no release yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=v$(sed -n "s/^__version__ = '\(.*\)'/\1/p" lexitap.py)
+          gh release view "$tag" > /dev/null 2>&1 || gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "LexiTap ${tag#v}" --generate-notes
