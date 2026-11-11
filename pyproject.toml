@@ -9,7 +9,7 @@ dynamic = ["version"]
 description = "PDF viewer: select text across lines and pages, translate whole sentences into Chinese with an LLM"
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["pymupdf>=1.24"]
+dependencies = ["pymupdf>=1.24,<2"]  # version 2 works too, but is three times the download
 
 [project.gui-scripts]
 lexitap = "lexitap:main"

@@ -89,6 +89,10 @@ r = pr.Reader(root)
 r.cfg.update(base_url=API + '/v1', api_key='sk-test', glossary='twisted angle = 扭转角\nexciton = 激子')
 c, t = r.canvas, r.out
 wait(400)
+check('the translation panel starts closed: the PDF has the whole window', (r.panel.get(), len(r.pw.panes())), (False, 1))
+r.panel.set(True)  # the tests below translate
+r.toggle_panel()
+wait(200)
 
 # ---------- sentences ----------
 r.open(PAPER)
@@ -138,7 +142,14 @@ check('highest zoom: same place, only the part around the view is drawn, the sel
        min(stack.index(i) for i in c.find_withtag('sel')) > max(stack.index(i) for _, i in r.tiles.values())),
       (8.0, 0, True, True, True))
 r.sel = None
-r.set_zoom(None)
+fits = []
+for on in (False, True):
+    r.set_zoom(r.zoom * 3)  # zoomed in: the page is wider than the view
+    r.panel.set(on)
+    r.toggle_panel()
+    wait(200)
+    fits.append((r.fit, len(r.pw.panes()), abs(r.rects[0].width * r.zoom + 2 * pr.GAP - c.winfo_width()) < 1))
+check('closing or opening the panel fits the page to the width that is left', fits, [(True, 1, True), (True, 2, True)])
 wait(300)
 
 # ---------- kinds of text in a journal page ----------

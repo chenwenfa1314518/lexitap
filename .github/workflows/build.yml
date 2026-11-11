@@ -27,8 +27,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      # PyMuPDF 2 has no ready-made build for Intel Macs, and compiling it there takes over 20 minutes
-      - run: python -m pip install "pymupdf${{ matrix.os == 'macos-15-intel' && '<2' || '' }}" pyinstaller pillow
+      # PyMuPDF 1.x: version 2 makes every package more than twice as large, and has no ready-made build for
+      # Intel Macs (compiling it there takes over 20 minutes)
+      - run: python -m pip install "pymupdf<2" pyinstaller pillow
       - name: Test
         shell: bash
         run: ${{ runner.os == 'Linux' && 'xvfb-run -a' || '' }} python tests/test_reader.py

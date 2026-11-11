@@ -18,7 +18,7 @@ except ImportError:
     messagebox.showerror('缺少依赖', '请先在命令行运行：\npip install -U pymupdf')
     sys.exit(1)
 
-__version__ = '1.1.0'
+__version__ = '1.1.1'
 HERE = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
 RES = getattr(sys, '_MEIPASS', HERE)  # bundled files (the icon) in a packaged app
 
@@ -260,16 +260,16 @@ class Reader:
         fe.bind('<Escape>', self.end_find)
         ttk.Button(bar, text='设置', command=self.settings).pack(side='right', padx=2)
         ttk.Button(bar, text='清空译文', command=self.clear).pack(side='right', padx=2)
-        self.panel = tk.BooleanVar(value=True)
+        self.panel = tk.BooleanVar(value=False)  # closed at the start: the PDF has the whole window
         ttk.Checkbutton(bar, text='翻译面板', variable=self.panel, command=self.toggle_panel).pack(side='right', padx=8)
 
         pw = self.pw = ttk.PanedWindow(root, orient='horizontal')
         pw.pack(fill='both', expand=True)
         left, right = ttk.Frame(pw, width=600, height=600), ttk.Frame(pw, width=400, height=600)
         self.right = right
-        for pane, weight in (left, 3), (right, 2):  # 60% and 40% of the window from the start, whatever they hold
+        for pane in left, right:  # with these sizes and the weights 3 : 2, the panel opens at 40% of the window
             pane.pack_propagate(False)
-            pw.add(pane, weight=weight)
+        pw.add(left, weight=3)
 
         c = self.canvas = tk.Canvas(left, bg='#e6e6e6', highlightthickness=0)
         ys = ttk.Scrollbar(left, command=lambda *a: (self.schedule_render(), c.yview(*a)))
@@ -1193,12 +1193,21 @@ class Reader:
 
     # ---------- translation ----------
     def toggle_panel(self):
+        """Open or close the translation panel, then fit the pages to the width that is left, so
+        that the whole width of the page stays in view."""
         if self.panel.get():
             self.pw.add(self.right, weight=2)
-            self.root.after(50, lambda: self.pw.sashpos(0, self.sash or int(self.pw.winfo_width() * 0.6)))
+            self.root.update_idletasks()
+            if self.sash:  # as wide as it was when it was closed
+                self.pw.sashpos(0, self.sash)
         else:
             self.sash = self.pw.sashpos(0)
             self.pw.forget(self.right)
+        self.root.update_idletasks()
+        for tab in self.tabs:
+            tab['fit'] = True
+        self.fit = True
+        self.layout()
 
     def translate(self, text):
         if not self.cfg['api_key'] and not re.search(r'//(localhost|127\.0\.0\.1)', self.cfg['base_url']):

@@ -6,9 +6,10 @@ systems: .github/workflows/build.yml builds all of them on GitHub). The packages
            lexitap-<version>-windows-x64.zip        portable: unzip anywhere and run the .exe
   macOS    lexitap-<version>-macos-<arch>.dmg       drag the app to Applications; opens PDFs from Finder
   Linux    lexitap_<version>_<arch>.deb             sudo apt install ./lexitap_<version>_<arch>.deb
-           lexitap-<version>-linux-<arch>.tar.gz    unpack anywhere and run lexitap/lexitap
+           lexitap-<version>-linux-<arch>.tar.xz    unpack anywhere and run lexitap/lexitap
 
-Needs: pip install pymupdf pyinstaller pillow        Run: python packaging/build.py
+Needs: pip install "pymupdf<2" pyinstaller pillow    Run: python packaging/build.py
+(PyMuPDF 1.x: version 2 works as well, but makes every package more than twice as large.)
 """
 import os, platform, plistlib, re, shutil, string, subprocess, sys, tarfile, time
 
@@ -48,7 +49,7 @@ UninstallDisplayName=$NAME
 OutputDir=$DIST
 OutputBaseFilename=$OUT
 WizardStyle=modern
-Compression=lzma2
+Compression=lzma2/ultra64
 SolidCompression=yes
 
 [Languages]
@@ -155,6 +156,12 @@ def inno_setup():
 
 def windows():
     app = pyinstaller(NAME)
+    inner = os.path.join(app, '_internal')  # leave out what the app never uses: copies of the C runtime that
+    for name in os.listdir(inner):          # Windows 10 and 11 have themselves, Tcl's time zones and month names
+        if name.startswith('api-ms-win-') or name == 'ucrtbase.dll':
+            os.remove(os.path.join(inner, name))
+    for name in 'tzdata', 'msgs':
+        shutil.rmtree(os.path.join(inner, '_tcl_data', name), ignore_errors=True)
     sign(os.path.join(app, NAME + '.exe'))
     shutil.make_archive(OUT + f'windows-{ARCH}', 'zip', os.path.dirname(app), NAME)
     iscc = shutil.which('iscc') or inno_setup()
@@ -186,8 +193,8 @@ def macos():
     shutil.move(app, stage)
     os.symlink('/Applications', os.path.join(stage, 'Applications'))  # the disk image says: drag the app here
     for _ in range(3):  # hdiutil is sometimes "busy" on build servers
-        if subprocess.run(['hdiutil', 'create', '-volname', NAME, '-srcfolder', stage, '-ov', '-format', 'UDZO',
-                           OUT + f'macos-{ARCH}.dmg']).returncode == 0:
+        if subprocess.run(['hdiutil', 'create', '-volname', NAME, '-srcfolder', stage, '-ov', '-format', 'ULMO',
+                           OUT + f'macos-{ARCH}.dmg']).returncode == 0:  # ULMO: the smallest; macOS 10.15 and later
             return
         time.sleep(10)
     sys.exit('hdiutil failed')
@@ -195,10 +202,10 @@ def macos():
 
 def linux():
     app = pyinstaller(ID)
-    with tarfile.open(OUT + f'linux-{ARCH}.tar.gz', 'w:gz') as tar:
+    with tarfile.open(OUT + f'linux-{ARCH}.tar.xz', 'w:xz') as tar:
         tar.add(app, ID)
     if not shutil.which('dpkg-deb'):
-        print('dpkg-deb not found: made the .tar.gz, no .deb.')
+        print('dpkg-deb not found: made the .tar.xz, no .deb.')
         return
     root, arch = os.path.join(BUILD, 'deb'), subprocess.check_output(['dpkg', '--print-architecture'], text=True).strip()
     shutil.rmtree(root, ignore_errors=True)
@@ -211,7 +218,7 @@ def linux():
     shutil.copy(ICON, os.path.join(root, f'usr/share/icons/hicolor/512x512/apps/{ID}.png'))
     os.makedirs(os.path.join(root, 'usr/bin'))
     os.symlink(f'/opt/{ID}/{ID}', os.path.join(root, 'usr/bin', ID))  # the "lexitap" command
-    subprocess.run(['dpkg-deb', '--build', '--root-owner-group', root,
+    subprocess.run(['dpkg-deb', '-Zxz', '--build', '--root-owner-group', root,  # xz: small, and every Debian reads it
                     os.path.join(DIST, f'{ID}_{VERSION}_{arch}.deb')], check=True)
 
 

@@ -1,6 +1,6 @@
 # LexiTap
 
-轻量的 PDF 阅读器，为读外文论文而做：用鼠标划选文字（可以跨行、跨栏、跨页），松开后选区自动扩展成完整的句子，译文流式显示在右侧面板。翻译默认使用 DeepSeek，也可以换成任何兼容 OpenAI 接口的大模型服务。
+轻量的 PDF 阅读器，为读外文论文而做：打开右侧的翻译面板，用鼠标划选文字（可以跨行、跨栏、跨页），松开后选区自动扩展成完整的句子，译文流式显示在面板里。翻译默认使用 DeepSeek，也可以换成任何兼容 OpenAI 接口的大模型服务。
 
 整个程序只有一个 Python 文件（`lexitap.py`），只依赖 PyMuPDF。
 
@@ -16,7 +16,7 @@
 | Windows 免安装版 | `lexitap-<版本>-windows-x64.zip` | 解压到任意位置，运行 `LexiTap.exe` |
 | macOS | `lexitap-<版本>-macos-arm64.dmg`（Apple 芯片）、`…-macos-x64.dmg`（Intel） | 打开后把应用拖进“应用程序” |
 | Debian、Ubuntu、Mint 等 | `lexitap_<版本>_amd64.deb` | `sudo apt install ./lexitap_<版本>_amd64.deb`，会添加菜单项、`lexitap` 命令和 PDF 的“打开方式” |
-| 其他 Linux | `lexitap-<版本>-linux-x64.tar.gz` | 解压后运行 `lexitap/lexitap` |
+| 其他 Linux | `lexitap-<版本>-linux-x64.tar.xz` | 解压后运行 `lexitap/lexitap` |
 | 装有 Python 3.9 以上的任何系统 | `lexitap-<版本>-py3-none-any.whl` | `pip install lexitap-<版本>-py3-none-any.whl`，然后运行 `lexitap`。Linux 上 Tk 要另装：`sudo apt install python3-tk` |
 
 说明：
@@ -35,10 +35,10 @@
 
 ## 从源码运行
 
-需要 Python 3.9 以上（自带 Tk），再装一个依赖：
+需要 Python 3.9 以上（自带 Tk），再装一个依赖（PyMuPDF 2 也能用，但下载体积是 1.x 的三倍）：
 
 ```bash
-pip install -U pymupdf
+pip install -U "pymupdf<2"
 ```
 
 - Windows：双击 `run.bat`，或把一个或多个 PDF 拖到它上面（每个文件开一个标签页）。
@@ -58,8 +58,11 @@ pip install -U pymupdf
 
 ## 使用方法
 
+启动时翻译面板是关闭的，PDF 占满整个窗口，这时 LexiTap 就是一个普通的 PDF 阅读器。要翻译，先打开面板。
+
 | 操作 | 作用 |
 | --- | --- |
+| 勾选“翻译面板”，或 Ctrl + T | 打开右侧的翻译面板。页面会重新适应面板左边剩下的宽度，整页宽度始终可见（即使之前放大过） |
 | 在文字上拖动 | 选中文字，可以跨行、跨栏、跨页；拖到窗口上下边缘之外会自动滚动。松开后选区扩展成完整的句子并翻译 |
 | 双击某个词 | 翻译它所在的句子 |
 | → / ← | 选中并翻译下一句 / 上一句（没有选区时从当前页面顶部开始），适合逐句精读 |
@@ -70,7 +73,7 @@ pip install -U pymupdf
 | 单击这类链接 | 跳转过去（网页链接用浏览器打开），Alt + ← 返回 |
 | 单击译文上方的“文件名 · 第 N 页” | 回到 PDF 里的原文处，文件已关闭时会重新打开 |
 | 取消勾选“自动扩展为整句” | 只翻译选中的内容（一个词或短语），不扩展成整句 |
-| 取消勾选“翻译面板”，或 Ctrl + T | 隐藏译文面板。面板隐藏时划选只是选中，不扩展也不翻译，和普通 PDF 阅读器一样；再勾选即可恢复 |
+| 取消勾选“翻译面板”，或再按 Ctrl + T | 关闭面板，页面重新占满窗口宽度。面板关闭时划选只是选中，不扩展也不翻译 |
 | 滚轮 / PageUp / PageDown / Home / End | 滚动 |
 | Ctrl + 滚轮，或 － ＋ | 缩放；“适应宽度”让页面宽度贴合窗口 |
 | 页码框、“目录” | 跳到某一页，或打开目录 |
@@ -171,7 +174,7 @@ MuPDF 有时会在公式、重音符号或上下标处，把视觉上的一行�
 代码推送到 GitHub 的 `main` 分支后，[GitHub Actions](.github/workflows/build.yml) 会自动：
 
 1. 在 Windows、macOS、Linux 上运行测试；
-2. 构建全部安装包（Windows 安装程序和 zip、macOS 磁盘映像、Linux 的 `.deb` 和 `.tar.gz`、pip 包），保存在这次运行的 Artifacts 里；
+2. 构建全部安装包（Windows 安装程序和 zip、macOS 磁盘映像、Linux 的 `.deb` 和 `.tar.xz`、pip 包），在各自的系统上安装并启动一次，然后保存在这次运行的 Artifacts 里；
 3. 如果 `lexitap.py` 顶部的版本号 `__version__` 还没有对应的 Release，就创建名为 `v<版本号>` 的 Release 并附上这些安装包。
 
 所以：
@@ -184,7 +187,7 @@ MuPDF 有时会在公式、重音符号或上下标处，把视觉上的一行�
 PyInstaller 只能为它所在的系统构建：
 
 ```bash
-pip install pymupdf pyinstaller pillow
+pip install "pymupdf<2" pyinstaller pillow
 python packaging/build.py
 ```
 
