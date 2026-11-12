@@ -18,7 +18,7 @@ except ImportError:
     messagebox.showerror('缺少依赖', '请先在命令行运行：\npip install -U pymupdf')
     sys.exit(1)
 
-__version__ = '1.1.1'
+__version__ = '1.2.0'
 HERE = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
 RES = getattr(sys, '_MEIPASS', HERE)  # bundled files (the icon) in a packaged app
 
@@ -73,6 +73,8 @@ MATH = re.compile('[=∑∫∏∂∇±×÷≈≠≤≥∞√⟨⟩∥∈∝]')  
 # what each tab remembers about its document (the translation panel and its cache are shared)
 TAB_STATE = ('doc', 'path', 'zoom', 'fit', 'rects', 'wcache', 'binfo', 'hcache', 'lcache', 'sel', 'anchor', 'cls', 'back')
 TAB_BAR, TAB_OFF, TAB_HOVER, TAB_ON, TAB_LINE = '#d3d6da', '#e4e6e9', '#eef0f2', '#ffffff', '#0a64c8'  # tab colours
+RIGHT = '<Button-2>' if sys.platform == 'darwin' else '<Button-3>'  # the right mouse button
+SAVE_PDF = '另存为 PDF'  # the last entry in the print window's list of printers
 
 
 def blank_tab():
@@ -82,7 +84,8 @@ def blank_tab():
 
 HINT = ['在左侧拖动选择文字（可跨行、跨页），松开后自动识别整句并翻译到这里。', '双击：翻译所在的句子',
         '→ / ←：翻译下一句 / 上一句', 'Shift+单击：把选区延伸到此处', 'Ctrl+F：搜索　Ctrl+C：复制选中的文字',
-        '鼠标停在引用编号或图号上可预览，单击跳转，Alt+← 返回', 'Ctrl+T：打开或关闭翻译面板']
+        '鼠标停在引用编号或图号上可预览，单击跳转，Alt+← 返回', 'Ctrl+T：打开或关闭翻译面板',
+        '右键：复制、翻译、搜索选中的文字　Ctrl+P：打印']
 
 
 def load_json(path, default):
@@ -187,6 +190,80 @@ def llm_stream(cfg, text):
         yield json.loads(raw)['choices'][0]['message']['content']
 
 
+def printers():
+    """Names of the system's printers, the default one first."""
+    try:
+        if sys.platform == 'win32':
+            import ctypes
+            from ctypes import wintypes as wt
+
+            class Info(ctypes.Structure):  # PRINTER_INFO_4
+                _fields_ = [('name', wt.LPWSTR), ('server', wt.LPWSTR), ('attributes', wt.DWORD)]
+            spool, n, count, name = ctypes.WinDLL('winspool.drv'), wt.DWORD(), wt.DWORD(), ctypes.create_unicode_buffer(256)
+            spool.EnumPrintersW(6, None, 4, None, 0, ctypes.byref(n), ctypes.byref(count))  # 6: local and connected ones
+            buf = ctypes.create_string_buffer(n.value)
+            spool.EnumPrintersW(6, None, 4, buf, n, ctypes.byref(n), ctypes.byref(count))
+            names = [i.name for i in (Info * count.value).from_buffer(buf)]
+            spool.GetDefaultPrinterW(name, ctypes.byref(wt.DWORD(256)))
+            default = name.value
+        else:
+            import subprocess
+            ask = lambda opt: subprocess.run(['lpstat', opt], capture_output=True, text=True, timeout=5).stdout
+            names, default = ask('-e').split(), ask('-d').strip().rpartition(': ')[2]
+    except Exception:  # no printing system
+        return []
+    return sorted(names, key=lambda s: s != default)
+
+
+def spool(doc, printer, pages, gray, title, out=None):
+    """Windows: print the pages, each as large as fits the paper (turned if the paper lies the other way),
+    drawn at up to 600 dpi in strips of 4 million dots, which keeps the memory small. Yields the count after
+    each page; closing the generator before the end cancels the job. out: a file that takes the printer's
+    output (for the tests)."""
+    import ctypes, struct
+    from ctypes import wintypes as wt
+
+    class DocInfo(ctypes.Structure):
+        _fields_ = [('size', ctypes.c_int), ('name', wt.LPCWSTR), ('out', wt.LPCWSTR), ('type', wt.LPCWSTR), ('flags', wt.DWORD)]
+    gdi = ctypes.WinDLL('gdi32')
+    gdi.CreateDCW.restype = ctypes.c_void_p
+    dc = ctypes.c_void_p(gdi.CreateDCW('WINSPOOL', printer, None, None))
+    end = gdi.AbortDoc
+    try:
+        if gdi.StartDocW(dc, ctypes.byref(DocInfo(ctypes.sizeof(DocInfo), title, out))) <= 0:
+            raise OSError('打印机没有响应')
+        W, H, dpi = (gdi.GetDeviceCaps(dc, i) for i in (8, 10, 88))  # the printable area in dots, dots per inch
+        k = max(dpi / 600, 1)  # dots per drawn pixel
+        for n, p in enumerate(pages, 1):
+            r = doc[p].rect
+            turn = (r.width > r.height) != (W > H)
+            z = min(W / (r.height if turn else r.width), H / (r.width if turn else r.height)) / k
+            m = pymupdf.Matrix(z, z).prerotate(90 * turn)
+            box, dl, rows = r * m, doc[p].get_displaylist(), max(int(4e6 / (r.width * z)), 1)
+            ox, oy = (W - box.width * k) / 2 - box.x0 * k, (H - box.height * k) / 2 - box.y0 * k  # centred
+            gdi.StartPage(dc)
+            for y in range(0, int(r.height * z - 1e-6) + 1, rows):
+                pix = dl.get_pixmap(matrix=m, colorspace=pymupdf.csGRAY if gray else pymupdf.csRGB, alpha=False,
+                                    clip=pymupdf.Rect(0, y / z, r.width, (y + rows) / z))
+                if gray:
+                    pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+                bits = bytearray(pymupdf.Pixmap(pix, 1).samples)  # 4 bytes per dot: rows need no padding
+                bits[0::4], bits[2::4] = bits[2::4], bits[0::4]   # Windows wants blue first
+                x0, y0, x1, y1 = (round(o + v * k) for o, v in ((ox, pix.x), (oy, pix.y), (ox, pix.x + pix.width),
+                                                                (oy, pix.y + pix.height)))
+                if not gdi.StretchDIBits(dc, x0, y0, x1 - x0, y1 - y0, 0, 0, pix.width, pix.height,
+                                         (ctypes.c_char * len(bits)).from_buffer(bits),
+                                         struct.pack('<IiiHHI20x', 40, pix.width, -pix.height, 1, 32, 0), 0, 0xCC0020):
+                    raise OSError('打印机不接受页面')
+            gdi.EndPage(dc)
+            if n == len(pages):
+                end = gdi.EndDoc
+            yield n
+    finally:
+        end(dc)
+        gdi.DeleteDC(dc)
+
+
 class Reader:
     def __init__(self, root, paths=(), restore=False):
         self.root, self.cfg = root, load_cfg()
@@ -234,6 +311,7 @@ class Reader:
         self.tabbar.pack(fill='x')
         self.tabbar.bind('<Configure>', self.on_tabbar_resize)
         ttk.Button(bar, text='打开', command=self.ask_open).pack(side='left', padx=2)
+        ttk.Button(bar, text='打印', command=self.print_dialog).pack(side='left', padx=2)
         self.toc = ttk.Menubutton(bar, text='目录', state='disabled')
         self.toc.pack(side='left', padx=2)
         ttk.Button(bar, text='－', width=3, command=lambda: self.set_zoom(self.zoom / 1.2)).pack(side='left', padx=(12, 0))
@@ -291,6 +369,13 @@ class Reader:
                         ('<Alt-Left>', lambda e: self.go_back()), ('<Leave>', lambda e: self.set_hover(None)),
                         ('<Control-Prior>', lambda e: self.next_tab(-1)), ('<Control-Next>', lambda e: self.next_tab(1))]:
             c.bind(seq, fn)
+        m = self.menu = tk.Menu(root, tearoff=0)  # right-click on the pages: the first four entries need a selection
+        for label, key, fn in [('复制', 'Ctrl+C', self.copy), ('翻译', '', self.translate_sel), ('在文中搜索', '', self.find_sel),
+                               ('在网上搜索', '', self.web_search), ('打印…', 'Ctrl+P', self.print_dialog)]:
+            m.add_command(label=label, accelerator=key, command=fn)
+        m.insert_separator(4)
+        c.bind(RIGHT, self.on_menu)
+        root.bind('<Control-p>', self.print_dialog)
         root.bind('<Control-f>', lambda e: (self.fentry.focus_set(), self.fentry.select_range(0, 'end'), 'break')[2])
         root.bind('<F3>', lambda e: self.find(1))
         root.bind('<Shift-F3>', lambda e: self.find(-1))
@@ -322,6 +407,11 @@ class Reader:
         t.bind('<1>', lambda e: t.focus_set())  # a disabled Text doesn't take focus by itself
         t.bind('<<Copy>>', self.copy_panel)
         t.bind('<Configure>', self.on_panel_resize)
+        pm = tk.Menu(root, tearoff=0)  # right-click on the translations
+        pm.add_command(label='复制', accelerator='Ctrl+C', command=self.copy_panel)
+        pm.add_command(label='清空译文', command=self.clear)
+        t.bind(RIGHT, lambda e: (pm.entryconfigure(0, state='normal' if t.tag_ranges('sel') else 'disabled'),
+                                 pm.tk_popup(e.x_root, e.y_root)))
 
     def settings(self):
         w = tk.Toplevel(self.root)
@@ -403,6 +493,10 @@ class Reader:
         save_cfg(self.cfg)
 
     def close(self):
+        """Close the window. With several files open it asks first, as browsers do for their tabs."""
+        if len(self.tabs) > 1 and not messagebox.askokcancel(
+                '关闭 LexiTap', f'要关闭全部 {len(self.tabs)} 个文件吗？\n下次启动时会重新打开它们。', parent=self.root):
+            return
         try:
             self.save_session()
         finally:  # the window closes even if the settings folder can't be written
@@ -767,7 +861,7 @@ class Reader:
             m, r = page.rotation_matrix, page.rect  # blocks reaching < 3 pt into the inner area are margin
             inner = pymupdf.Rect(r.width * MARGIN + 3, r.height * MARGIN + 3,
                                  r.width * (1 - MARGIN) - 3, r.height * (1 - MARGIN) - 3)
-            cls, boxes, nchars = {}, {}, {}  # per block: class, bbox, characters
+            cls, boxes, nchars, texts = {}, {}, {}, {}  # per block: class, bbox, characters, text
             flow = {}  # class -> (bbox, characters, number) of its last block in the text flow
             for b in page.get_text('dict', textpage=tp)['blocks']:
                 sizes, fonts = {}, {}  # characters per font size / per font
@@ -779,9 +873,11 @@ class Reader:
                 if sizes:
                     first, box = b['lines'][0], pymupdf.Rect(b['bbox']) * m
                     boxes[b['number']] = box
-                    start = ''.join(s['text'] for s in first['spans']).lstrip()
-                    kind = ('margin' if not box.intersects(inner) else 'caption' if CAPTION.match(start) else
-                            'note' if box.y0 > r.height * 0.6 and NOTE.match(start) else 'body')
+                    text = ''.join(s['text'] for line in b['lines'] for s in line['spans']).lstrip()
+                    kind = ('caption' if CAPTION.match(text) else
+                            'note' if box.y0 > r.height * 0.6 and NOTE.match(text) else 'body')
+                    texts[b['number']] = kind, re.sub(r'[\d\s]', '', text), b['bbox'][1]  # its kind outside the margin strip
+                    kind = kind if box.intersects(inner) else 'margin'
                     c = tuple(round(v, 1) for v in first['dir']), max(sizes, key=sizes.get), kind, max(fonts, key=fonts.get)
                     cls[b['number']], n, prev = c, sum(sizes.values()), flow.get(c)
                     nchars[b['number']] = n
@@ -794,6 +890,24 @@ class Reader:
                             continue
                         cls[prev[2]] = c[:2] + ('box',) + c[3:]
                     flow[c] = box, n, b['number']
+            # MuPDF gives each paragraph a block of its own, so the first or last paragraph of a column can lie
+            # wholly in the margin strip. It is text, not a header or footer, if it continues the text right
+            # below or above it (same font and size, less than a line and a half away, overlapping it sideways)
+            # and nothing like it stands at that height on the pages around (as page numbers and headers do).
+            near = None  # (top, text without digits) of the blocks on the two pages before and after
+            for _ in range(3):
+                for k in [k for k in boxes if cls[k][2] == 'margin']:
+                    a, c = boxes[k], cls[k]
+                    j = next((j for j, b in boxes.items() if cls[j][2] != 'margin' and cls[j][:2] + cls[j][3:] == c[:2] + c[3:]
+                              and max(a.y0 - b.y1, b.y0 - a.y1) < 1.5 * c[1]
+                              and min(a.x1, b.x1) - max(a.x0, b.x0) > 0.5 * min(a.width, b.width)), None)
+                    if j is None:
+                        continue
+                    if near is None:
+                        near = [(b[1], re.sub(r'[\d\s]', '', b[4])) for q in (p - 2, p - 1, p + 1, p + 2)
+                                if 0 <= q < self.doc.page_count for b in self.doc[q].get_text('blocks', flags=WORD_FLAGS)]
+                    if not any(abs(y - texts[k][2]) < 4 and t == texts[k][1] for y, t in near):
+                        cls[k] = cls[j] if texts[k][0] == 'body' else c[:2] + (texts[k][0],) + c[3:]
             # MuPDF splits lines into separate blocks at formulas, accents and sub/superscripts. A short
             # block on the same line as a bigger one, touching it or inside its outline, joins its text
             # (a caption first). Repeated so chains of pieces resolve; tall blocks never change.
@@ -1144,6 +1258,154 @@ class Reader:
         if self.sel:
             self.root.clipboard_clear()
             self.root.clipboard_append(self.text(*self.sel))
+
+    def on_menu(self, e):
+        """Right-click on the pages: what can be done with the selected text, and printing."""
+        self.set_hover(None)
+        for i in range(4):
+            self.menu.entryconfigure(i, state='normal' if self.sel else 'disabled')
+        self.menu.entryconfigure(5, state='normal' if self.doc else 'disabled')
+        self.menu.tk_popup(e.x_root, e.y_root)
+
+    def translate_sel(self):
+        if not self.panel.get():  # the translation needs its panel
+            self.panel.set(True)
+            self.toggle_panel()
+        self.finish()
+        self.reveal(self.sel[0])
+
+    def find_sel(self):
+        self.fvar.set(self.text(*self.sel).split('\n')[0][:60])
+        self.find(1)
+
+    def web_search(self):
+        import urllib.parse, webbrowser  # loaded on first use
+        webbrowser.open('https://www.bing.com/search?q=' + urllib.parse.quote(self.text(*self.sel)[:300]))
+
+    # ---------- printing ----------
+    def print_dialog(self, e=None):
+        """Ctrl+P: a preview of the pages beside the choice of printer, pages, copies and colour, as in a
+        browser. Returns the window (the tests drive it)."""
+        if not self.doc:
+            return
+        w = tk.Toplevel(self.root)
+        w.title('打印')
+        w.transient(self.root)
+        w.resizable(False, False)
+        w.geometry(f'+{self.root.winfo_rootx() + 120}+{self.root.winfo_rooty() + 60}')
+        n, cur, s, at, job = self.doc.page_count, self.view()[0], self.dpi / 96, [0], []
+        names = printers() + [SAVE_PDF]
+        w.dest, w.spec, w.copies, gray = tk.StringVar(w, names[0]), tk.StringVar(w, '全部'), tk.StringVar(w, '1'), tk.BooleanVar(w)
+        left = tk.Frame(w, bg='#e6e6e6', width=int(450 * s), height=int(600 * s))
+        left.pack_propagate(False)
+        left.grid(row=0, column=0, padx=12, pady=(12, 6))
+        view = tk.Label(left, bg='#e6e6e6')
+        view.pack(expand=True)
+        nav = ttk.Frame(w)
+        nav.grid(row=1, column=0, pady=(0, 10))
+        ttk.Button(nav, text='◀', width=3, command=lambda: turn(-1)).pack(side='left')
+        where = ttk.Label(nav, width=22, anchor='center')
+        where.pack(side='left')
+        ttk.Button(nav, text='▶', width=3, command=lambda: turn(1)).pack(side='left')
+        form = ttk.Frame(w, padding=(4, 12, 14, 0))
+        form.grid(row=0, column=1, sticky='n')
+        fields = [('目标打印机', ttk.Combobox(form, textvariable=w.dest, values=names, state='readonly', width=34)),
+                  ('页面', ttk.Combobox(form, textvariable=w.spec, values=['全部', '当前页', '奇数页', '偶数页'], width=34)),
+                  ('份数', ttk.Spinbox(form, textvariable=w.copies, from_=1, to=99, width=6)),
+                  ('颜色', ttk.Checkbutton(form, text='黑白', variable=gray))]
+        for i, (label, f) in enumerate(fields):
+            ttk.Label(form, text=label).grid(row=i, column=0, sticky='e', padx=(0, 8), pady=7)
+            f.grid(row=i, column=1, sticky='w', pady=7)
+        ttk.Label(form, foreground='#777', text='“页面”里也可以填页码，例如 1-5, 8').grid(row=4, column=1, sticky='w')
+
+        def pages():
+            """The chosen pages, counted from 0."""
+            sets = {'全部': range(n), '当前页': [cur], '奇数页': range(0, n, 2), '偶数页': range(1, n, 2)}
+            return list(sets.get(w.spec.get().strip()) or (p for a, b in re.findall(r'(\d+)(?:\s*[-–—~～－]\s*(\d+))?', w.spec.get())
+                                                           for p in range(int(a) - 1, int(b or a)) if 0 <= p < n))
+
+        def show(*_):
+            ps, pdf = pages(), w.dest.get() == SAVE_PDF
+            at[0] = max(min(at[0], len(ps) - 1), 0)
+            for f in fields[2][1], fields[3][1]:  # a PDF file is written once and keeps its colours
+                f.state(['disabled' if pdf else '!disabled'])
+            if not job:
+                w.ok.config(text='保存' if pdf else '打印', state='normal' if ps else 'disabled')
+            where.config(text=f'第 {ps[at[0]] + 1} 页（{at[0] + 1} / {len(ps)}）' if ps else '没有这样的页')
+            if ps:
+                page = self.doc[ps[at[0]]]
+                z = min(440 / page.rect.width, 590 / page.rect.height) * s
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(z, z), alpha=False,
+                                      colorspace=pymupdf.csGRAY if gray.get() and not pdf else pymupdf.csRGB)
+                view.image = tk.PhotoImage(data=pix.tobytes('ppm'))
+            view.config(image=view.image if ps else '')
+
+        def turn(d):
+            at[0] += d
+            show()
+
+        def step():  # Windows: a page at a time, so that the window stays alive; closing it cancels the job
+            try:
+                if not w.winfo_exists():
+                    return job[0].close()
+                w.ok.config(text=f'{next(job[0])} / {job[1]}')
+                self.root.after(1, step)
+            except StopIteration:
+                w.destroy()
+            except Exception as e:
+                messagebox.showerror('无法打印', str(e), parent=w)
+                w.destroy()
+
+        def go():
+            ps, name, title = pages(), w.dest.get(), os.path.basename(self.path)
+            k = max(int(w.copies.get()), 1) if w.copies.get().isdigit() else 1
+            try:
+                if name == SAVE_PDF:
+                    path = filedialog.asksaveasfilename(parent=w, defaultextension='.pdf', filetypes=[('PDF', '*.pdf')],
+                                                        initialfile=os.path.splitext(title)[0] + '-选页.pdf')
+                    if not path:
+                        return
+                    if any(os.path.normcase(os.path.abspath(path)) == os.path.normcase(t['path']) for t in self.tabs):
+                        raise OSError('这个文件正开着，不能覆盖，请换一个文件名。')  # its pages are still being read from it
+                    self.save_pages(ps, path)
+                elif sys.platform == 'win32':
+                    job[:] = spool(self.doc, name, ps * k, gray.get(), title), len(ps) * k
+                    w.ok.config(state='disabled')
+                    return step()
+                else:  # macOS, Linux: their print service takes PDF files
+                    import subprocess, tempfile
+                    with tempfile.TemporaryDirectory() as d:
+                        self.save_pages(ps, os.path.join(d, title))
+                        done = subprocess.run(['lp', '-d', name, '-n', str(k), *(['-o', 'print-color-mode=monochrome'] * gray.get()),
+                                               os.path.join(d, title)], capture_output=True, text=True, timeout=60)
+                    if done.returncode:
+                        raise OSError(done.stderr.strip())
+                w.destroy()
+            except Exception as e:
+                messagebox.showerror('无法打印', str(e), parent=w)
+        ends = ttk.Frame(w)
+        ends.grid(row=1, column=1, sticky='e', padx=14, pady=(0, 10))
+        w.ok = ttk.Button(ends, command=go)
+        w.ok.pack(side='left', padx=8)
+        ttk.Button(ends, text='取消', command=w.destroy).pack(side='left')
+        for v in w.dest, w.spec, gray:
+            v.trace_add('write', show)
+        w.bind('<MouseWheel>', lambda e: turn(-1 if e.delta > 0 else 1))
+        w.bind('<Return>', lambda e: w.ok.invoke())
+        w.bind('<Escape>', lambda e: w.destroy())
+        w.pages = pages
+        show()
+        w.grab_set()
+        w.ok.focus_set()
+        return w
+
+    def save_pages(self, pages, path):
+        """Write the chosen pages to a new PDF file."""
+        new = pymupdf.open()
+        new.insert_pdf(self.doc if self.doc.is_pdf else pymupdf.open('pdf', self.doc.convert_to_pdf()))
+        new.select(pages)
+        new.save(path, garbage=3, deflate=True)
+        new.close()
 
     # ---------- search ----------
     def hits(self, p):

@@ -6,6 +6,7 @@ journal(path): stored in the order journal PDFs use: a sideways watermark first,
     columns (a heading, indented paragraphs, citations glued to full stops, a citation linked to
     the reference list, a display formula), then a figure with small labels and a caption that sits
     at the top of page 1, then the footer. Page 2 continues the text and holds the references.
+low_paragraph(path): a column that ends with a paragraph in the bottom margin, where footers usually are.
 """
 import re
 import pymupdf
@@ -148,6 +149,26 @@ def journal(path):
     doc.save(path)
 
 
+def low_paragraph(path):
+    """Page 1: under a running header in the body's font, a left column whose last paragraph lies wholly
+    in the bottom margin strip; its sentence goes on at the top of the right column. Page 2: the same
+    header and little else."""
+    doc = pymupdf.open()
+    for n in range(2):
+        pg = doc.new_page(width=612, height=792)
+        lines = [(54, 62, f'Journal of Invented Results {n + 12} (2026)'), (302, 776, str(n + 1)),
+                 (54, 86, 'The second page says little.')]
+        if n == 0:
+            lines[2:] = [(54, 86 + LH * i, f'Sample {i + 11} of the first group holds water far too firmly.') for i in range(50)]
+            lines += [(54, 716, 'We did not study that group here.'), (64, 738, 'In the second group the hydrogen atoms'),
+                      (54, 738 + LH, 'of every ring'), (312, 86, 'keep the oxygen atoms in place.'),
+                      (312, 86 + LH, 'That group is studied below.')]
+        for x, y, s in lines:
+            pg.insert_text((x, y), s, fontsize=FS, fontname='tiro')
+    doc.save(path)
+
+
 if __name__ == '__main__':
     two_column('two_column.pdf')
     journal('journal.pdf')
+    low_paragraph('low_paragraph.pdf')

@@ -173,6 +173,16 @@ check('watermark on its own', sentence('https://example.org/sharing'),
 check('formula becomes [公式] for translation', sentence('energy', formulas=True),
       'The energy of each stacking is given by [公式] where m is the mass of the unit cell.')
 check('title for context', r.paper_title(), 'Moiré Patterns in Stacked Layers: An Overview')
+LOW = os.path.join(TMP, 'low_paragraph.pdf')
+make_pdfs.low_paragraph(LOW)
+r.open(LOW)
+kinds = {w[4]: w[8][2] for w in r.words(0)}
+check('a paragraph in the bottom margin is text, the page number and the running header are not',
+      (kinds['ring'], kinds['1'], kinds['Journal']), ('body', 'margin', 'margin'))
+check('...so the sentence before it ends there, and its own goes on in the next column',
+      (sentence('study'), sentence('ring')), ('We did not study that group here.', 'In the second group the '
+                                              'hydrogen atoms of every ring keep the oxygen atoms in place.'))
+r.close_tab(r.cur)
 
 # ---------- API client ----------
 cfg = dict(pr.DEFAULTS, base_url=API + '/v1', api_key='k', model='m1', title='A Paper',
@@ -368,15 +378,106 @@ r.panel.set(False)
 r.toggle_panel()
 drag(find('Smith', 0), find('al.', 0))
 check('panel closed: exact selection, no translation', (r.text(*r.sel), len(r.entries)), ('Smith et al.', n))
-r.panel.set(True)
-r.toggle_panel()
+
+# ---------- right-click menu ----------
+import webbrowser
+popped, urls, sel = [], [], r.sel
+r.menu.tk_popup = lambda *a: popped.append(a)
+webbrowser.open = urls.append
+states = []
+for r.sel in (None, sel):
+    r.on_menu(Ev(x_root=5, y_root=5))
+    states.append([r.menu.entrycget(i, 'state') for i in (0, 1, 2, 3, 5)])
+check('right-click: the entries for selected text need a selection, printing does not', (states, len(popped)),
+      ([['disabled'] * 4 + ['normal'], ['normal'] * 5], 2))
+r.menu.invoke(0)
+r.menu.invoke(3)
+check('...复制 copies the selection, 在网上搜索 hands it to the browser', (root.clipboard_get(), urls),
+      ('Smith et al.', ['https://www.bing.com/search?q=Smith%20et%20al.']))
+r.menu.invoke(2)
+check('...在文中搜索 looks for it in the document', (r.fq, r.fstat.cget('text')), ('Smith et al.', '第 1 页'))
+r.end_find()
+r.menu.invoke(1)
+translated()
+check('...翻译 opens the panel and translates the whole sentence', (r.panel.get(), len(r.entries) - n, r.text(*r.sel)),
+      (True, 1, 'Prior work by Smith et al. (2021) studied this problem in depth.'))
+
+# ---------- printing ----------
+r.switch(1)  # the journal: 2 pages
+w = r.print_dialog()
+sets = []
+for spec in ('全部', '奇数页', '偶数页', '2, 1-2', '0, 3, x'):
+    w.spec.set(spec)
+    sets.append(w.pages())
+check('print window: page sets and page lists; without pages there is nothing to print',
+      (sets, str(w.ok.cget('state'))), ([[0, 1], [0], [1], [1, 0, 1], []], 'disabled'))
+OUT, errs = os.path.join(TMP, 'out.pdf'), []
+pr.messagebox.showerror = lambda *a, **k: errs.append(a)
+pr.filedialog.asksaveasfilename = lambda **k: r.path
+w.spec.set('2')
+w.dest.set(pr.SAVE_PDF)
+w.ok.invoke()
+check('...另存为 PDF does not write over a file that is open', (len(errs), w.winfo_exists(), os.path.getsize(r.path) == os.path.getsize(JOURNAL),
+                                                          pymupdf.open(JOURNAL).page_count), (1, 1, True, 2))
+pr.filedialog.asksaveasfilename = lambda **k: OUT
+w.ok.invoke()
+out = pymupdf.open(OUT)
+check('...另存为 PDF writes the chosen pages to a file and closes the window',
+      (out.page_count, out[0].get_text() == r.doc[1].get_text(), w.winfo_exists()), (1, True, 0))
+out.close()
+if sys.platform == 'win32' and 'Microsoft Print to PDF' in pr.printers():  # Windows' own printer that writes a file
+    doc = pymupdf.open()
+    for wd, ht in ((612, 792), (792, 612)):  # an upright and a lying page: red square top left, blue bottom right
+        pg = doc.new_page(width=wd, height=ht)
+        pg.draw_rect(pymupdf.Rect(50, 50, 150, 150), color=(1, 0, 0), fill=(1, 0, 0))
+        pg.draw_rect(pymupdf.Rect(wd - 150, ht - 150, wd - 50, ht - 50), color=(0, 0, 1), fill=(0, 0, 1))
+
+    def seen(page, x, y):
+        """The colour printed for the point (x, y) of an upright page, as 0 or 1 for red, green, blue."""
+        s = min(page.rect.width / 612, page.rect.height / 792)
+        at = pymupdf.Point((page.rect.width - 612 * s) / 2 + x * s, (page.rect.height - 792 * s) / 2 + y * s)
+        return page.get_pixmap(clip=pymupdf.Rect(at, at + (1, 1))).pixel(0, 0)
+    bit = lambda c: ''.join(str(v // 128) for v in c)
+    counts = list(pr.spool(doc, 'Microsoft Print to PDF', [0, 1], False, 'LexiTap test', OUT))
+    out = pymupdf.open(OUT)
+    got = [bit(seen(out[0], *at)) for at in ((100, 100), (512, 692), (306, 396))]
+    got += [bit(seen(out[1], 612 - y, x)) for x, y in ((100, 100), (692, 512))]  # turned a quarter: (x, y) is at (612 - y, x)
+    check('Windows printer: pages arrive the right way up, in their colours, a lying page turned to fit the paper',
+          (counts, out.page_count, got), ([1, 2], 2, ['100', '001', '111', '100', '001']))
+    out.close()
+    list(pr.spool(doc, 'Microsoft Print to PDF', [0], True, 'LexiTap test', OUT))
+    out = pymupdf.open(OUT)
+    c = seen(out[0], 100, 100)
+    check('...黑白 prints grey', (max(c) - min(c) < 12, 30 < c[0] < 160), (True, True))
+    out.close()
+    job = pr.spool(doc, 'Microsoft Print to PDF', [0, 1], False, 'LexiTap test', OUT)
+    next(job)
+    job.close()  # what closing the print window does while it prints
+    check('...a job that is cancelled leaves the printer free for the next', list(pr.spool(doc, 'Microsoft Print to PDF', [0], False, 't', OUT)), [1])
+    real, pr.spool = pr.spool, lambda *a: real(*a, OUT)  # the window's own job, sent to the file
+    w = r.print_dialog()
+    w.dest.set('Microsoft Print to PDF')
+    w.spec.set('偶数页')
+    w.copies.set('2')
+    w.ok.invoke()
+    wait(60000, lambda: not w.winfo_exists())
+    out = pymupdf.open(OUT)
+    check('print window: 打印 sends the chosen pages, as many times as asked, then closes', (w.winfo_exists(), out.page_count), (0, 2))
+    out.close()
+    pr.spool = real
+else:
+    print('SKIP  printing on a Windows printer (no "Microsoft Print to PDF" here)')
 
 # ---------- closing the window ----------
-r.close_tab(1)
-closed = []
+asked, closed = [], []
+pr.messagebox.askokcancel = lambda *a, **k: asked.append(a) or False  # answers "取消"
 root.destroy = lambda real=root.destroy: (closed.append(1), real())
 r.close()
-check('closing the window saves the open tabs', (len(closed), len(pr.load_cfg()['session']['tabs'])), (1, 1))
+check('closing the window with several files open asks first; 取消 keeps it open', (len(asked), len(closed)), (1, 0))
+r.close_tab(1)
+r.close()
+check('...with one file it closes without asking, and saves the open tabs',
+      (len(asked), len(closed), len(pr.load_cfg()['session']['tabs'])), (1, 1, 1))
 
 print('callback errors:', len(errors), *errors)
 print('FAILURES:', fails + len(errors))
